@@ -1,0 +1,13 @@
+* text=auto eol=lf
+
+*.py text
+*.md text
+*.txt text
+*.json text
+*.env.example text
+
+# Binary / generated files
+*.pyc binary
+__pycache__/ export-ignore
+.venv/ export-ignore
+.env export-ignore
