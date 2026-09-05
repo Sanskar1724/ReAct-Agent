@@ -5,11 +5,54 @@ import sys
 from typing import Any
 
 
+def _safe_text(text: str) -> str:
+    """Replace characters the active stdout encoding cannot render."""
+    if not isinstance(text, str):
+        text = str(text)
+    try:
+        encoding = (sys.stdout.encoding or "utf-8")
+        text.encode(encoding, errors="strict")
+        return text
+    except Exception:
+        replacements = {
+            "✔": "[ok]",
+            "✖": "[x]",
+            "⚠": "[!]",
+            "ℹ": "[i]",
+            "…": "...",
+            "›": ">",
+            "─": "-",
+            "│": "|",
+            "┌": "+",
+            "┐": "+",
+            "└": "+",
+            "┘": "+",
+            "⠋": "*",
+            "⠙": "*",
+            "⠹": "*",
+            "⠸": "*",
+            "⠼": "*",
+            "⠴": "*",
+            "⠦": "*",
+            "⠧": "*",
+            "⠇": "*",
+            "⠏": "*",
+        }
+        for src, dst in replacements.items():
+            text = text.replace(src, dst)
+        try:
+            text.encode(sys.stdout.encoding or "utf-8", errors="strict")
+            return text
+        except Exception:
+            return text.encode("ascii", errors="replace").decode("ascii")
+
+
 class Console:
     """Minimal, dependency-free terminal styling and layout helper.
 
     Gracefully degrades to plain text when stdout is not a TTY or when
-    NO_COLOR is set in the environment.
+    NO_COLOR is set in the environment. All output is sanitized so it
+    never crashes on Windows cp1252 consoles.
     """
 
     def __init__(self, use_color: bool | None = None) -> None:
@@ -55,9 +98,18 @@ class Console:
 
     # --- higher level output ---------------------------------------------
     def print(self, *args: Any, **kwargs: Any) -> None:
-        print(*args, **kwargs)
+        safe_args = [_safe_text(a) if isinstance(a, str) else a for a in args]
+        try:
+            print(*safe_args, **kwargs)
+        except UnicodeEncodeError:
+            ascii_args = [
+                str(a).encode("ascii", errors="replace").decode("ascii")
+                if isinstance(a, str) else a for a in safe_args
+            ]
+            print(*ascii_args, **kwargs)
 
-    def rule(self, title: str = "", char: str = "─", width: int = 60) -> None:
+    def rule(self, title: str = "", char: str = "-", width: int = 60) -> None:
+        # Use ASCII-safe default so Windows consoles never crash.
         if title:
             label = f" {title} "
             pad = max(0, width - len(label))
@@ -66,33 +118,33 @@ class Console:
             line = char * left + label + char * right
         else:
             line = char * width
-        print(self.gray(line))
+        self.print(self.gray(line))
 
-    def panel(self, title: str, body: str, *, border: str = "│") -> None:
+    def panel(self, title: str, body: str, *, border: str = "|") -> None:
         lines = body.splitlines() or [""]
         width = max((len(line) for line in lines), default=0)
-        print(self.gray(f"┌─ {title} " + "─" * max(0, width - len(title) - 1) + "┐"))
+        self.print(self.gray(f"+- {title} " + "-" * max(0, width - len(title) - 1) + "+"))
         for line in lines:
-            print(self.gray(border) + " " + line + " " +
+            self.print(self.gray(border) + " " + line + " " +
                   self.gray(border))
-        print(self.gray("└" + "─" * (width + 2) + "┘"))
+        self.print(self.gray("+" + "-" * (width + 2) + "+"))
 
     def key_value(self, pairs: list[tuple[str, str]], key_color=None) -> None:
         key_fn = key_color or self.cyan
         for key, value in pairs:
-            print(f"  {key_fn(self.bold(key))}: {value}")
+            self.print(f"  {key_fn(self.bold(key))}: {value}")
 
     def success(self, text: str) -> None:
-        print(self.green("✔ ") + text)
+        self.print(self.green("[ok] ") + text)
 
     def warn(self, text: str) -> None:
-        print(self.yellow("⚠ ") + text)
+        self.print(self.yellow("[!] ") + text)
 
     def error(self, text: str) -> None:
-        print(self.red("✖ ") + text)
+        self.print(self.red("[x] ") + text)
 
     def info(self, text: str) -> None:
-        print(self.blue("ℹ ") + text)
+        self.print(self.blue("[i] ") + text)
 
     def status(self, text: str) -> None:
-        print(self.gray("… ") + self.dim(text))
+        self.print(self.gray("... ") + self.dim(text))

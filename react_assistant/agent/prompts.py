@@ -10,10 +10,22 @@ from react_assistant.utils.helpers import read_text
 class PromptBuilder:
     def __init__(self, system_prompt_path: Path) -> None:
         self.system_prompt_path = system_prompt_path
+        self._cached_template: str | None = None
+        self._cached_mtime: float | None = None
+
+    def _load_template(self) -> str:
+        try:
+            mtime = self.system_prompt_path.stat().st_mtime
+        except OSError:
+            return self._default_prompt()
+        if self._cached_template is None or self._cached_mtime != mtime:
+            self._cached_template = read_text(
+                self.system_prompt_path, default=self._default_prompt())
+            self._cached_mtime = mtime
+        return self._cached_template or self._default_prompt()
 
     def build(self, user_input: str, memory_summary: str, tools: ToolRegistry, scratchpad: str = "") -> list[ChatMessage]:
-        system_prompt = read_text(
-            self.system_prompt_path, default=self._default_prompt())
+        system_prompt = self._load_template()
         tool_lines = "\n".join(
             f"- {description}" for description in tools.descriptions())
         context_parts = [
@@ -22,7 +34,7 @@ class PromptBuilder:
             "Available tools:",
             tool_lines or "- No tools registered.",
             "",
-            memory_summary.strip(),
+            (memory_summary or "").strip(),
         ]
         if scratchpad.strip():
             context_parts.extend(

@@ -2,7 +2,8 @@
 .venv/
 __pycache__/
 *.pyc
-react_assistant/logs/
+react_assistant/logs/*.log
+react_assistant/logs/*.jsonl
 react_assistant/memory/history.json
 _check.py
 _probe.py

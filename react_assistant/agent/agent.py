@@ -20,6 +20,7 @@ class AssistantAgent:
         logger: ActionLogger,
         max_iterations: int,
         tool_timeout_seconds: int | None = None,
+        max_scratchpad_chars: int = 12000,
     ) -> None:
         self.llm_client = llm_client
         self.memory = memory
@@ -36,15 +37,29 @@ class AssistantAgent:
             logger,
             max_iterations,
             tool_timeout_seconds=tool_timeout_seconds,
+            max_scratchpad_chars=max_scratchpad_chars,
         )
 
     def ask(self, user_input: str) -> ReActRunResult:
-        self.memory.append("user", user_input)
+        user_input = (user_input or "").strip()
+        if not user_input:
+            raise ValueError("Empty prompt.")
+        # Build the memory summary EXCLUDING nothing yet (current message not
+        # stored), then store. This avoids sending the current message twice
+        # (once in the summary, once as the user turn).
         messages = self._build_messages(user_input)
-        result = self._react_loop.run(messages)
+        self.memory.append("user", user_input)
+        try:
+            result = self._react_loop.run(messages)
+        except Exception:
+            # Roll back the optimistic user append? No - keep it so the user
+            # can see what failed. Just re-raise.
+            raise
         self.memory.append("assistant", result.final_answer)
         return result
 
     def _build_messages(self, user_input: str) -> list[ChatMessage]:
-        memory_summary = self.memory.summary()
+        # Exclude 0 trailing records because current input is not yet stored.
+        # But include prior history (last 8) truncated per-record.
+        memory_summary = self.memory.summary(max_messages=8)
         return self.prompt_builder.build(user_input=user_input, memory_summary=memory_summary, tools=self.tools)
