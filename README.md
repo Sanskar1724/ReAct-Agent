@@ -1,19 +1,37 @@
-# ReAct Assistant
+# ReAct Assistant v0.2 — multi-ability agent
 
-A terminal-first Python assistant that demonstrates a **ReAct (Reason + Act)** agent loop, safe tool execution, JSON-backed conversation memory, and structured logging. It talks to any **OpenAI-compatible** API (OpenRouter, NVIDIA NIM, OpenAI, …) and falls back to a built-in **mock mode** when no API key is configured.
+A terminal-first Python assistant that runs a **ReAct (Reason + Act)** loop: iterative *Thought → Action → Observation → Final Answer* reasoning with safe, timeout-guarded tools, JSON-backed memory, and structured logging. It talks to any **OpenAI-compatible** API (OpenRouter, NVIDIA NIM, OpenAI, …) and falls back to **mock mode** when no API key is configured.
 
-> Zero heavy dependencies. The CLI is styled with the standard library only — no `rich`/`click` required.
+> Zero heavy dependencies. Only `python-dotenv` — CLI styling, HTTP, and tooling are standard library.
 
 ---
 
 ## ✨ Features
 
-- **ReAct loop** — iterative *Thought → Action → Observation → Final Answer* reasoning with a configurable iteration cap.
-- **Tool calling** — a registry of safe, timeout-guarded tools (`calculator`, `datetime`, `weather` placeholder).
-- **Conversation memory** — persisted to JSON, summarized and fed back into prompts.
-- **Professional CLI** — colored, non-blocking spinner, ruled panels, a `Thinking` trace per iteration, and a clean `Final Answer` block.
-- **Structured logging** — human-readable log + JSONL event stream.
-- **Mock mode** — runs end-to-end with no network or API key.
+- **ReAct loop** — multi-step *Thought → Action → Observation* chains with loop detection, scratchpad caps, and graceful step-limit answers (no more crashes on max iterations).
+- **9 tools, one per turn, chained across turns** — math, live weather, web fetch, workspace files, shell, and Python execution.
+- **Conversation memory** — persisted to JSON (capped, atomic writes, corruption-safe), summarized into prompts, searchable.
+- **Professional CLI** — Windows-safe colors, non-blocking spinner, `Reasoning` trace, clean `Final Answer` block, accumulated token usage.
+- **Structured logging** — rotating human-readable log + JSONL event stream (secrets redacted).
+- **Mock mode** — runs end-to-end with no network or API key (`--mock`).
+
+---
+
+## 🛠️ Tools
+
+| Tool | Aliases | What it does | Example input |
+|------|---------|--------------|---------------|
+| `calculator` | `calc`, `math` | Safe arithmetic via `ast` (limits on size/exponent) | `18 * 49` |
+| `datetime` | `time`, `now` | Current UTC time (ISO-8601) | *(empty)* |
+| `weather` | `forecast` | **Live** weather via Open-Meteo, no key needed | `Paris` / `Delhi, India` |
+| `web_fetch` | `fetch`, `web`, `url` | Fetch URL → stripped text (truncated, SSRF-blocked) | `https://example.com` |
+| `read_file` | `read`, `cat` | Read workspace text file (~6000 chars) | `README.md` |
+| `write_file` | `write`, `save` | Write workspace file (1st line = path) | `notes/todo.txt\nBuy milk` |
+| `list_dir` | `ls`, `list`, `dir` | List workspace directory | `.` / `notes` |
+| `shell` | `run`, `exec`, `cmd` | Shell command in workspace (15s, destructive cmds blocked) | `python --version` |
+| `python_exec` | `python`, `py`, `code` | Run Python snippet (10s, stdout captured) | `print(2+2)` |
+
+File/shell tools are sandboxed to `WORKSPACE_ROOT` (default: project root) — paths escaping it are rejected.
 
 ---
 
@@ -28,20 +46,22 @@ python -m venv .venv
 pip install -r requirements.txt
 
 # 3. Configure credentials
-cp .env.example .env
+Copy-Item .env.example .env
 #   then edit .env and set OPENROUTER_API_KEY / BASE_URL / MODEL
 
 # 4. Run the assistant
 python -m react_assistant
 ```
 
-Run a single prompt without the interactive loop:
+Single prompts and overrides:
 
 ```powershell
 python -m react_assistant --prompt "What is 18 * 49?"
-python -m react_assistant --once          # read one prompt from stdin
-python -m react_assistant --no-banner    # suppress the startup banner
-python -m react_assistant --no-color     # force plain (uncolored) output
+python -m react_assistant --mock --prompt "hi"   # force mock, no network
+python -m react_assistant --once                 # read one prompt from stdin
+python -m react_assistant --model "gpt-4o-mini" --max-iterations 10 --prompt "..."
+python -m react_assistant --no-banner            # suppress the startup banner
+python -m react_assistant --no-color             # force plain (uncolored) output
 ```
 
 Example `.env`:
@@ -51,9 +71,17 @@ OPENROUTER_API_KEY=your_api_key_here
 BASE_URL=https://openrouter.ai/api/v1
 MODEL=meta/llama-3.3-70b-instruct
 LLM_USE_MOCK=0
+REACT_MAX_ITERATIONS=8
+TOOL_TIMEOUT_SECONDS=15
+LLM_TIMEOUT_SECONDS=60
+LLM_MAX_RETRIES=2
+LLM_TEMPERATURE=0.2
+WORKSPACE_ROOT=
+MAX_HISTORY_RECORDS=200
+MAX_SCRATCHPAD_CHARS=12000
 ```
 
-The assistant runs in **live** mode when `OPENROUTER_API_KEY` is set and `LLM_USE_MOCK` is `0`/unset; otherwise it uses **mock** mode.
+Live mode when a real key is set and `LLM_USE_MOCK` is `0`/unset; otherwise mock mode.
 
 ---
 
@@ -64,24 +92,28 @@ The assistant runs in **live** mode when `OPENROUTER_API_KEY` is set and `LLM_US
 | `/help` | Show the help text |
 | `/tools` | List registered tools |
 | `/memory` | Show recent conversation memory |
-| `/status` | Show runtime config (model, mode, timeouts, tool list, turns) |
+| `/status` | Show runtime config (model, mode, timeouts, retries, tools, workspace, turns) |
 | `/clear` | Clear conversation history |
 | `/` or `/?` | Show the command menu inline |
 | `/exit` (`exit`, `quit`) | Quit the assistant |
 
-When the agent uses tools, output looks like:
+Multi-step example — the agent chains tools across turns:
 
 ```
-──────────────────────── Reasoning ────────────────────────
+----------------------- Reasoning ------------------------
 Iteration 1
-  Thought     I need to compute 18 * 49.
-  Action      calculator (18 * 49)
-  Observation 882
-───────────────────────────────────────────────────────────
-─────────────────────── Final Answer ──────────────────────
-882
-───────────────────────────────────────────────────────────
-  model llama-3.3-70b-instruct · iterations 1 · tools calculator · usage 318 tok
+  Thought    I need live weather first, then I can summarize and save it.
+  Action     weather (Paris)
+  Observation Weather in Paris, France: partly cloudy, 14C ...
+Iteration 2
+  Thought    Now I'll save that summary to a file.
+  Action     write_file (notes/paris_weather.txt ...)
+  Observation Wrote 32 chars to notes/paris_weather.txt.
+------------------------------------------------------------
+---------------------- Final Answer ------------------------
+Paris is partly cloudy at 14C, saved to notes/paris_weather.txt.
+------------------------------------------------------------
+  model tencent/hy3:free  |  iterations 2  |  tools weather, write_file  |  usage 280 tok (p250/c30)
 ```
 
 ---
@@ -94,38 +126,45 @@ Single-Agent/
 ├── .gitignore
 ├── .gitattributes
 ├── LICENSE                 # MIT
-├── README.md
+├── README.md               # this file
 ├── requirements.txt        # python-dotenv
 ├── DOCUMENTATION.md        # deep-dive reference
 └── react_assistant/
     ├── __init__.py         # package marker, __version__
     ├── __main__.py         # entry point for `python -m react_assistant`
     ├── main.py             # CLI, runtime wiring, commands
-    ├── config.py           # AppConfig: typed settings from .env
+    ├── config.py           # AppConfig: typed settings from .env + CLI overrides
     ├── cli/                # dependency-free terminal styling
-    │   ├── console.py      # Console: colors, rules, panels, key/value
+    │   ├── console.py      # Console: Windows-safe colors, rules, panels
     │   └── spinner.py      # Spinner: non-blocking terminal spinner
     ├── llm/
-    │   ├── client.py       # OpenAICompatibleClient (live + mock)
+    │   ├── client.py       # OpenAICompatibleClient (retries, mock, guards)
     │   └── models.py       # ChatMessage, LLMResponse, LLMUsage
     ├── agent/
     │   ├── agent.py        # AssistantAgent: orchestration
-    │   ├── parser.py       # ReActParser: extracts Thought/Action/...
-    │   ├── prompts.py      # PromptBuilder: assembles messages
-    │   └── react_loop.py   # ReActLoop: the core cycle
+    │   ├── parser.py       # ReActParser: Thought/Action/Action Input/Final Answer
+    │   ├── prompts.py      # PromptBuilder: cached template + tool list
+    │   └── react_loop.py   # ReActLoop: cycle, loop detection, usage sum
     ├── memory/
-    │   └── memory.py       # ConversationMemory: JSON history
+    │   ├── __init__.py
+    │   └── memory.py       # ConversationMemory: capped atomic JSON history
     ├── tools/
-    │   ├── registry.py     # ToolRegistry + RunnableTool protocol
+    │   ├── __init__.py
+    │   ├── registry.py     # ToolRegistry (shared pool, real timeouts)
     │   ├── calculator.py   # safe arithmetic via ast
     │   ├── datetime_tool.py# current UTC time
-    │   └── weather.py      # placeholder weather tool
+    │   ├── weather.py      # live Open-Meteo weather
+    │   ├── web_fetch.py    # URL → text
+    │   ├── files.py        # read_file / write_file / list_dir (sandboxed)
+    │   └── shell.py        # shell + python_exec
     ├── logs/
-    │   └── logger.py       # ActionLogger: text + JSONL
+    │   ├── __init__.py
+    │   └── logger.py       # ActionLogger: rotating text + JSONL
     ├── templates/
-    │   └── system_prompt.txt
+    │   └── system_prompt.txt  # multi-tool ReAct instructions
     └── utils/
-        └── helpers.py      # JSON/text IO, timestamps, dir helpers
+        ├── __init__.py
+        └── helpers.py      # atomic IO, truncation, timestamps
 ```
 
 For a full module-by-module reference, architecture diagrams, the ReAct loop
@@ -135,23 +174,29 @@ walkthrough, and extension guides, see **[DOCUMENTATION.md](DOCUMENTATION.md)**.
 
 ## ⚙️ Configuration
 
-All settings are read from `.env` (see `.env.example`). Supported variables:
+All settings are read from `.env` (see `.env.example`), overridable via CLI (`--model`, `--max-iterations`, `--mock`):
 
 | Variable | Meaning | Default |
 |----------|---------|---------|
-| `OPENROUTER_API_KEY` (or `OPENAI_API_KEY`, `LLM_API_KEY`) | API key | none |
+| `OPENROUTER_API_KEY` (or `OPENAI_API_KEY`, `LLM_API_KEY`) | API key | none (→ mock) |
 | `BASE_URL` (or `OPENROUTER_BASE_URL`, `OPENAI_BASE_URL`) | Endpoint base URL | `https://openrouter.ai/api/v1` |
 | `MODEL` (or `OPENROUTER_MODEL`, `OPENAI_MODEL`) | Model name | `gpt-4o-mini` |
 | `LLM_USE_MOCK` | `1`/`true`/`yes`/`on` forces mock mode | off if key present |
-| `REACT_MAX_ITERATIONS` | Max ReAct loop iterations | `6` |
-| `TOOL_TIMEOUT_SECONDS` | Tool execution timeout (enforced) | `10` |
+| `REACT_MAX_ITERATIONS` | Max ReAct steps (graceful answer at limit) | `8` |
+| `TOOL_TIMEOUT_SECONDS` | Tool execution timeout (enforced) | `15` |
+| `LLM_TIMEOUT_SECONDS` | HTTP timeout per attempt | `60` |
+| `LLM_MAX_RETRIES` | Retries on 429/5xx/network | `2` |
+| `LLM_TEMPERATURE` | Sampling temperature | `0.2` |
+| `WORKSPACE_ROOT` | Sandbox root for file/shell tools | project root |
+| `MAX_HISTORY_RECORDS` | Cap on stored history | `200` |
+| `MAX_SCRATCHPAD_CHARS` | Cap on cross-iteration reasoning | `12000` |
 
 ---
 
 ## 📤 Output Locations
 
 - **Console** — live prompts and answers.
-- `react_assistant/logs/assistant.log` — human-readable activity log.
+- `react_assistant/logs/assistant.log` — human-readable activity log (rotating).
 - `react_assistant/logs/actions.jsonl` — structured event log (one JSON/line).
 - `react_assistant/memory/history.json` — conversation history (git-ignored).
 
@@ -176,9 +221,11 @@ from react_assistant.tools.my_tool import MyTool
 tools.register(MyTool())
 ```
 
-**Switch provider/model** — edit `.env` (`BASE_URL`, `MODEL`, key). Any OpenAI-compatible API works.
+Rules: unique `name`, no alias collisions (raises on conflict), input ≤ 8000 chars, output truncated at 8000 chars, honor the registry timeout.
 
-**Customize behavior** — edit `react_assistant/templates/system_prompt.txt` to change agent instructions without touching code.
+**Switch provider/model** — edit `.env` (`BASE_URL`, `MODEL`, key) or pass `--model`. Any OpenAI-compatible API works.
+
+**Customize behavior** — edit `react_assistant/templates/system_prompt.txt` (hot-reloaded by mtime) to change agent instructions without touching code.
 
 ---
 
@@ -186,7 +233,7 @@ tools.register(MyTool())
 
 1. Fork and create a feature branch.
 2. Keep dependencies minimal; prefer the standard library.
-3. Run the assistant in mock mode (`LLM_USE_MOCK=1`) for quick local testing.
+3. Run the assistant in mock mode (`--mock` or `LLM_USE_MOCK=1`) for quick local testing.
 4. Open a pull request with a clear description.
 
 ---
